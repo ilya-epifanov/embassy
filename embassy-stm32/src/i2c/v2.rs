@@ -415,10 +415,10 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
                     w.set_tcie(true);
                 }
             });
-            let dst = regs.txdr().ptr() as *mut u8;
+            let dst = regs.txdr().ptr() as *mut u32;
 
             let ch = &mut self.tx_dma;
-            ch.write(ch.request(), bytes, dst)
+            ch.write_u8(ch.request(), bytes, dst)
         };
 
         let state_number = T::state_number();
@@ -507,10 +507,10 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
                 w.set_rxdmaen(true);
                 w.set_tcie(true);
             });
-            let src = regs.rxdr().ptr() as *mut u8;
+            let src = regs.rxdr().ptr() as *mut u32;
 
             let ch = &mut self.rx_dma;
-            ch.read(ch.request(), src, buffer)
+            ch.read_u8(ch.request(), src, buffer)
         };
 
         let state_number = T::state_number();

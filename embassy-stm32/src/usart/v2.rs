@@ -86,8 +86,8 @@ impl<'d, T: Instance, TxDma, RxDma> Uart<'d, T, TxDma, RxDma> {
             });
         }
         let r = self.inner.regs();
-        let dst = r.tdr().ptr() as *mut u8;
-        ch.write(ch.request(), buffer, dst).await;
+        let dst = r.tdr().ptr() as *mut u32;
+        ch.write_u8(ch.request(), buffer, dst).await;
         Ok(())
     }
 
@@ -102,8 +102,8 @@ impl<'d, T: Instance, TxDma, RxDma> Uart<'d, T, TxDma, RxDma> {
             });
         }
         let r = self.inner.regs();
-        let src = r.rdr().ptr() as *mut u8;
-        ch.read(ch.request(), src, buffer).await;
+        let src = r.rdr().ptr() as *mut u32;
+        ch.read_u8(ch.request(), src, buffer).await;
         Ok(())
     }
 
