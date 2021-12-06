@@ -12,9 +12,19 @@ use crate::pac;
 use crate::pac::dma::{regs, vals};
 use crate::rcc::sealed::RccPeripheral;
 
-use super::{Channel, Request};
+use super::{Request, Word, WordSize};
 
 const CH_COUNT: usize = pac::peripheral_count!(DMA) * 8;
+
+impl From<WordSize> for vals::Size {
+    fn from(raw: WordSize) -> Self {
+        match raw {
+            WordSize::OneByte => Self::BITS8,
+            WordSize::TwoBytes => Self::BITS16,
+            WordSize::FourBytes => Self::BITS32,
+        }
+    }
+}
 
 struct State {
     ch_wakers: [AtomicWaker; CH_COUNT],
@@ -74,163 +84,85 @@ pub(crate) unsafe fn init() {
     }
 }
 
-macro_rules! impl_do_transfer {
-    ($dma_peri:ident, $channel_num:expr, $request:expr, $peri_addr:expr, $buf:expr, $count:expr, $incr_mem:expr, $dir:expr, $size:expr) => {
-        unsafe {
-            low_level_api::do_transfer(
-                crate::pac::$dma_peri,
-                $channel_num,
-                (dma_num!($dma_peri) * 8) + $channel_num,
-                $request,
-                $dir,
-                $peri_addr as *const u32,
-                $buf,
-                $count,
-                $incr_mem,
-                $size,
-                #[cfg(dmamux)]
-                <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_REGS,
-                #[cfg(dmamux)]
-                <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_CH_NUM,
-            )
-        }
-    };
-}
-
-macro_rules! impl_start_transfer {
-    ($dma_peri:ident, $channel_num:expr, $request:expr, $peri_addr:expr, $buf:expr, $dir:expr, $size:expr) => {
-        unsafe {
-            let isrn = $channel_num as usize / 4;
-            let isrbit = $channel_num as usize % 4;
-            low_level_api::reset_status(&crate::pac::$dma_peri, isrn, isrbit);
-            low_level_api::start_transfer(
-                $request,
-                $dir,
-                $peri_addr as *const u32,
-                $buf.as_ptr() as *mut u32,
-                $buf.len(),
-                true,
-                crate::pac::$dma_peri.st($channel_num as _),
-                $size,
-                #[cfg(dmamux)]
-                <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_REGS,
-                #[cfg(dmamux)]
-                <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_CH_NUM,
-            )
-        }
-    };
-}
-
 pac::dma_channels! {
     ($channel_peri:ident, $dma_peri:ident, dma, $channel_num:expr, $dmamux:tt) => {
-        impl crate::dma::sealed::Channel for crate::peripherals::$channel_peri {}
-
-        impl Channel for crate::peripherals::$channel_peri {
-            type ReadFuture<'a> = impl Future<Output = ()> + 'a;
-            type WriteFuture<'a> = impl Future<Output = ()> + 'a;
+        impl crate::dma::sealed::Channel for crate::peripherals::$channel_peri {
             type CompletionFuture<'a> = impl Future<Output = ()> + 'a;
 
-            fn read_u8<'a>(
-                &'a mut self,
-                request: Request,
-                reg_addr: *mut u32,
-                buf: &'a mut [u8],
-            ) -> Self::ReadFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_mut_ptr() as *mut u32, buf.len(), true, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS8)
+            unsafe fn start_write<W: Word>(&mut self, request: Request, buf: &[W], reg_addr: *mut u32) {
+                let isrn = $channel_num as usize / 4;
+                let isrbit = $channel_num as usize % 4;
+                low_level_api::reset_status(&crate::pac::$dma_peri, isrn, isrbit);
+                low_level_api::start_transfer(
+                    request,
+                    vals::Dir::MEMORYTOPERIPHERAL,
+                    reg_addr as *const u32,
+                    buf.as_ptr() as *mut u32,
+                    buf.len(),
+                    true,
+                    crate::pac::$dma_peri.st($channel_num as _),
+                    vals::Size::from(W::bits()),
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_REGS,
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_CH_NUM,
+                )
             }
 
-            fn read_u16<'a>(
-                &'a mut self,
-                request: Request,
-                reg_addr: *mut u32,
-                buf: &'a mut [u16],
-            ) -> Self::ReadFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_mut_ptr() as *mut u32, buf.len(), true, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS16)
+            unsafe fn start_write_repeated<W: Word>(&mut self, request: Request, repeated: W, count: usize, reg_addr: *mut u32) {
+                let buf = [repeated];
+                let isrn = $channel_num as usize / 4;
+                let isrbit = $channel_num as usize % 4;
+                low_level_api::reset_status(&crate::pac::$dma_peri, isrn, isrbit);
+                low_level_api::start_transfer(
+                    request,
+                    vals::Dir::MEMORYTOPERIPHERAL,
+                    reg_addr as *const u32,
+                    buf.as_ptr() as *mut u32,
+                    count,
+                    false,
+                    crate::pac::$dma_peri.st($channel_num as _),
+                    vals::Size::from(W::bits()),
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_REGS,
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_CH_NUM,
+                )
             }
 
-            fn read_u32<'a>(
-                &'a mut self,
-                request: Request,
-                reg_addr: *mut u32,
-                buf: &'a mut [u32],
-            ) -> Self::ReadFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_mut_ptr() as *mut u32, buf.len(), true, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS32)
+            unsafe fn start_read<W: Word>(&mut self, request: Request, reg_addr: *mut u32, buf: &mut [W]) {
+                let isrn = $channel_num as usize / 4;
+                let isrbit = $channel_num as usize % 4;
+                low_level_api::reset_status(&crate::pac::$dma_peri, isrn, isrbit);
+                low_level_api::start_transfer(
+                    request,
+                    vals::Dir::PERIPHERALTOMEMORY,
+                    reg_addr as *const u32,
+                    buf.as_ptr() as *mut u32,
+                    buf.len(),
+                    true,
+                    crate::pac::$dma_peri.st($channel_num as _),
+                    vals::Size::from(W::bits()),
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_REGS,
+                    #[cfg(dmamux)]
+                    <Self as super::dmamux::sealed::MuxChannel>::DMAMUX_CH_NUM,
+                );
             }
 
-            fn write_u8<'a>(
-                &'a mut self,
-                request: Request,
-                buf: &'a [u8],
-                reg_addr: *mut u32,
-            ) -> Self::WriteFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_ptr() as *mut u32, buf.len(), true, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS8)
-            }
-
-            fn write_u16<'a>(
-                &'a mut self,
-                request: Request,
-                buf: &'a [u16],
-                reg_addr: *mut u32,
-            ) -> Self::WriteFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_ptr() as *mut u32, buf.len(), true, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS16)
-            }
-
-            fn write_u32<'a>(
-                &'a mut self,
-                request: Request,
-                buf: &'a [u32],
-                reg_addr: *mut u32,
-            ) -> Self::WriteFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, buf.as_ptr() as *mut u32, buf.len(), true, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS32)
-            }
-
-            fn write_x<'a>(
-                &'a mut self,
-                request: Request,
-                word: &u8,
-                num: usize,
-                reg_addr: *mut u32,
-            ) -> Self::WriteFuture<'a> {
-                impl_do_transfer!($dma_peri, $channel_num, request, reg_addr, word as *const u8 as *mut u32, num, false, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS8)
-            }
-
-            fn start_write_u8<'a>(&'a mut self, request: Request, buf: &'a [u8], reg_addr: *mut u32) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS8)
-            }
-
-            fn start_write_u16<'a>(&'a mut self, request: Request, buf: &'a [u16], reg_addr: *mut u32) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS16)
-            }
-
-            fn start_write_u32<'a>(&'a mut self, request: Request, buf: &'a [u32], reg_addr: *mut u32) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::MEMORYTOPERIPHERAL, vals::Size::BITS32)
-            }
-
-            fn start_read_u8<'a>(&'a mut self, request: Request, reg_addr: *mut u32, buf: &'a mut [u8]) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS8)
-            }
-
-            fn start_read_u16<'a>(&'a mut self, request: Request, reg_addr: *mut u32, buf: &'a mut [u16]) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS16)
-            }
-
-            fn start_read_u32<'a>(&'a mut self, request: Request, reg_addr: *mut u32, buf: &'a mut [u32]) {
-                impl_start_transfer!($dma_peri, $channel_num, request, reg_addr, buf, vals::Dir::PERIPHERALTOMEMORY, vals::Size::BITS32)
-            }
-
-            fn stop<'a>(&'a mut self) {
+            fn stop(&mut self) {
                 unsafe {low_level_api::stop(&crate::pac::$dma_peri, $channel_num);}
             }
 
-            fn is_stopped<'a>(&'a self) -> bool {
+            fn is_stopped(&self) -> bool {
                 unsafe {low_level_api::is_stopped(&crate::pac::$dma_peri, $channel_num)}
             }
 
-            fn remaining_transfers<'a>(&'a mut self) -> u16 {
+            fn remaining_transfers(&mut self) -> u16 {
                 unsafe {low_level_api::get_remaining_transfers(&crate::pac::$dma_peri, $channel_num)}
             }
 
-            fn set_waker<'a>(&'a mut self, waker: &'a Waker) {
+            fn set_waker(&mut self, waker: &Waker) {
                 unsafe {low_level_api::set_waker(&crate::pac::$dma_peri,  $channel_num, waker )}
             }
 
@@ -238,6 +170,8 @@ pac::dma_channels! {
                 unsafe {low_level_api::wait_for_completion(&crate::pac::$dma_peri, (dma_num!($dma_peri) * 8) + $channel_num, $channel_num)}
             }
         }
+
+        impl crate::dma::Channel for crate::peripherals::$channel_peri { }
     };
 }
 
@@ -353,9 +287,14 @@ mod low_level_api {
     }
 
     /// Stops the DMA channel.
-    pub unsafe fn stop(dma: &pac::dma::Dma, ch: u8) {
+    pub unsafe fn stop(dma: &pac::dma::Dma, channel_number: u8) {
+        // Reset status
+        let isrn = channel_number as usize / 4;
+        let isrbit = channel_number as usize % 4;
+        reset_status(dma, isrn, isrbit);
+
         // get a handle on the channel itself
-        let ch = dma.st(ch as _);
+        let ch = dma.st(channel_number as _);
 
         // Disable the channel and interrupts with the default value.
         ch.cr().write(|_| ());
