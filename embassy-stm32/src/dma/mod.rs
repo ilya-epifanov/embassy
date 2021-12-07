@@ -8,7 +8,6 @@ mod dmamux;
 #[cfg(dmamux)]
 pub use dmamux::*;
 
-use core::future::Future;
 use embassy::util::Unborrow;
 
 #[cfg(feature = "unstable-pac")]
@@ -26,10 +25,6 @@ pub(crate) mod sealed {
     use super::*;
     use core::task::Waker;
     pub trait Channel {
-        type CompletionFuture<'a>: Future<Output = ()> + 'a
-        where
-            Self: 'a;
-
         /// Starts this channel for writing a stream of words.
         unsafe fn start_write<W: Word>(&mut self, request: Request, buf: &[W], reg_addr: *mut u32);
 
@@ -51,7 +46,7 @@ pub(crate) mod sealed {
         );
 
         /// Stops this channel.
-        fn stop(&mut self);
+        fn request_stop(&mut self);
 
         /// Returns whether this channel is active or stopped.
         fn is_stopped(&self) -> bool;
@@ -61,8 +56,6 @@ pub(crate) mod sealed {
 
         /// Sets the waker that is called when this channel completes.
         fn set_waker(&mut self, waker: &Waker);
-
-        fn wait_for_completion<'a>(&mut self) -> Self::CompletionFuture<'a>;
     }
 }
 
@@ -93,8 +86,11 @@ impl Word for u32 {
 }
 
 mod transfers {
+    use core::task::Poll;
+
     use super::Channel;
     use embassy_hal_common::{drop::OnDrop, unborrow};
+    use futures::future::poll_fn;
 
     use super::*;
 
@@ -109,16 +105,16 @@ mod transfers {
         let drop_clone = unsafe { channel.unborrow() };
         unborrow!(channel);
 
-        channel.stop();
+        channel.request_stop();
         let on_drop = OnDrop::new({
             let mut channel = drop_clone;
             move || {
-                channel.stop();
+                channel.request_stop();
             }
         });
 
         unsafe { channel.start_read::<W>(request, reg_addr, buf) };
-        channel.wait_for_completion().await;
+        wait_for_stopped(&mut channel).await;
         drop(on_drop)
     }
 
@@ -133,16 +129,16 @@ mod transfers {
         let drop_clone = unsafe { channel.unborrow() };
         unborrow!(channel);
 
-        channel.stop();
+        channel.request_stop();
         let on_drop = OnDrop::new({
             let mut channel = drop_clone;
             move || {
-                channel.stop();
+                channel.request_stop();
             }
         });
 
         unsafe { channel.start_write::<W>(request, buf, reg_addr) };
-        channel.wait_for_completion().await;
+        wait_for_stopped(&mut channel).await;
         drop(on_drop)
     }
 
@@ -157,17 +153,33 @@ mod transfers {
         let drop_clone = unsafe { channel.unborrow() };
         unborrow!(channel);
 
-        channel.stop();
+        channel.request_stop();
         let on_drop = OnDrop::new({
             let mut channel = drop_clone;
             move || {
-                channel.stop();
+                channel.request_stop();
             }
         });
 
         unsafe { channel.start_write_repeated::<W>(request, repeated, count, reg_addr) };
-        channel.wait_for_completion().await;
+        wait_for_stopped(&mut channel).await;
         drop(on_drop)
+    }
+
+    async fn wait_for_stopped(channel: &mut impl Unborrow<Target = impl Channel>) {
+        unborrow!(channel);
+        poll_fn(move |cx| {
+            channel.set_waker(cx.waker());
+
+            // TODO in the future, error checking could be added so that this function returns an error
+
+            if channel.is_stopped() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 }
 

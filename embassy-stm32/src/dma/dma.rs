@@ -1,11 +1,8 @@
-use core::future::Future;
 use core::sync::atomic::{fence, Ordering};
-use core::task::{Poll, Waker};
+use core::task::Waker;
 
 use embassy::interrupt::{Interrupt, InterruptExt};
 use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::drop::OnDrop;
-use futures::future::poll_fn;
 
 use crate::interrupt;
 use crate::pac;
@@ -87,8 +84,6 @@ pub(crate) unsafe fn init() {
 pac::dma_channels! {
     ($channel_peri:ident, $dma_peri:ident, dma, $channel_num:expr, $dmamux:tt) => {
         impl crate::dma::sealed::Channel for crate::peripherals::$channel_peri {
-            type CompletionFuture<'a> = impl Future<Output = ()> + 'a;
-
             unsafe fn start_write<W: Word>(&mut self, request: Request, buf: &[W], reg_addr: *mut u32) {
                 let isrn = $channel_num as usize / 4;
                 let isrbit = $channel_num as usize % 4;
@@ -150,8 +145,8 @@ pac::dma_channels! {
                 );
             }
 
-            fn stop(&mut self) {
-                unsafe {low_level_api::stop(&crate::pac::$dma_peri, $channel_num);}
+            fn request_stop(&mut self) {
+                unsafe {low_level_api::request_stop(&crate::pac::$dma_peri, $channel_num);}
             }
 
             fn is_stopped(&self) -> bool {
@@ -164,10 +159,6 @@ pac::dma_channels! {
 
             fn set_waker(&mut self, waker: &Waker) {
                 unsafe {low_level_api::set_waker(&crate::pac::$dma_peri,  $channel_num, waker )}
-            }
-
-            fn wait_for_completion<'a>(&mut self) -> Self::CompletionFuture<'a> {
-                unsafe {low_level_api::wait_for_completion(&crate::pac::$dma_peri, (dma_num!($dma_peri) * 8) + $channel_num, $channel_num)}
             }
         }
 
@@ -187,61 +178,6 @@ pac::interrupts! {
 mod low_level_api {
     use super::*;
 
-    #[allow(unused)]
-    pub(crate) unsafe fn do_transfer(
-        dma: pac::dma::Dma,
-        channel_number: u8,
-        state_number: u8,
-        request: Request,
-        dir: vals::Dir,
-        peri_addr: *const u32,
-        mem_addr: *mut u32,
-        mem_len: usize,
-        incr_mem: bool,
-        data_size: vals::Size,
-        #[cfg(dmamux)] dmamux_regs: pac::dmamux::Dmamux,
-        #[cfg(dmamux)] dmamux_ch_num: u8,
-    ) -> impl Future<Output = ()> {
-        // ndtr is max 16 bits.
-        assert!(mem_len <= 0xFFFF);
-
-        // Reset status
-        let isrn = channel_number as usize / 4;
-        let isrbit = channel_number as usize % 4;
-        reset_status(&dma, isrn, isrbit);
-
-        let ch = dma.st(channel_number as _);
-
-        let on_drop = OnDrop::new(move || unsafe {
-            low_level_api::stop(&dma, channel_number);
-        });
-
-        // "Preceding reads and writes cannot be moved past subsequent writes."
-        fence(Ordering::Release);
-
-        // Actually start the transaction
-        start_transfer(
-            request,
-            dir,
-            peri_addr,
-            mem_addr,
-            mem_len,
-            incr_mem,
-            ch,
-            data_size,
-            #[cfg(dmamux)]
-            dmamux_regs,
-            #[cfg(dmamux)]
-            dmamux_ch_num,
-        );
-
-        async move {
-            let res = wait_for_completion(&dma, state_number, channel_number).await;
-
-            drop(on_drop)
-        }
-    }
-
     pub unsafe fn start_transfer(
         request: Request,
         dir: vals::Dir,
@@ -258,7 +194,7 @@ mod low_level_api {
         super::super::dmamux::configure_dmamux(dmamux_regs, dmamux_ch_num, request);
 
         // "Preceding reads and writes cannot be moved past subsequent writes."
-        fence(Ordering::Release);
+        fence(Ordering::SeqCst);
 
         ch.par().write_value(peri_addr as u32);
         ch.m0ar().write_value(mem_addr as u32);
@@ -287,7 +223,7 @@ mod low_level_api {
     }
 
     /// Stops the DMA channel.
-    pub unsafe fn stop(dma: &pac::dma::Dma, channel_number: u8) {
+    pub unsafe fn request_stop(dma: &pac::dma::Dma, channel_number: u8) {
         // Reset status
         let isrn = channel_number as usize / 4;
         let isrbit = channel_number as usize % 4;
@@ -299,11 +235,8 @@ mod low_level_api {
         // Disable the channel and interrupts with the default value.
         ch.cr().write(|_| ());
 
-        // Wait for the transfer to complete when it was ongoing.
-        while ch.cr().read().en() {}
-
         // "Subsequent reads and writes cannot be moved ahead of preceding reads."
-        fence(Ordering::Acquire);
+        fence(Ordering::SeqCst);
     }
 
     /// Gets the running status of the channel
@@ -335,29 +268,5 @@ mod low_level_api {
             w.set_tcif(isrbit, true);
             w.set_teif(isrbit, true);
         });
-    }
-
-    pub unsafe fn wait_for_completion<'a>(
-        dma: &'a crate::pac::dma::Dma,
-        state_number: u8,
-        channel_number: u8,
-    ) -> impl Future<Output = ()> + 'a {
-        let isrn = channel_number as usize / 4;
-        let isrbit = channel_number as usize % 4;
-
-        poll_fn(move |cx| {
-            unsafe { set_waker(&dma, state_number, cx.waker()) };
-
-            let isr = dma.isr(isrn).read();
-
-            // TODO handle error
-            assert!(!isr.teif(isrbit));
-
-            if isr.tcif(isrbit) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
     }
 }
