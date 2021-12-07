@@ -98,6 +98,7 @@ mod transfers {
 
     use super::*;
 
+    #[allow(unused)]
     pub async fn read<'a, W: Word>(
         channel: &mut impl Unborrow<Target = impl Channel>,
         request: Request,
@@ -121,6 +122,7 @@ mod transfers {
         drop(on_drop)
     }
 
+    #[allow(unused)]
     pub async fn write<'a, W: Word>(
         channel: &mut impl Unborrow<Target = impl Channel>,
         request: Request,
@@ -144,6 +146,7 @@ mod transfers {
         drop(on_drop)
     }
 
+    #[allow(unused)]
     pub async fn write_repeated<W: Word>(
         channel: &mut impl Unborrow<Target = impl Channel>,
         request: Request,
