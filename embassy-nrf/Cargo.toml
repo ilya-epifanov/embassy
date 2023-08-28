@@ -49,6 +49,7 @@ _gpio-p1 = []
 embassy = { version = "0.1.0", path = "../embassy" }
 embassy-macros = { version = "0.1.0", path = "../embassy-macros", features = ["nrf"]}
 embassy-hal-common = {version = "0.1.0", path = "../embassy-hal-common" }
+embassy-traits = { version = "0.1.0", path = "../embassy-traits" }
 
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6" }
 embedded-hal-1 = { package = "embedded-hal", version = "1.0.0-alpha.6", git = "https://github.com/embassy-rs/embedded-hal", branch = "embassy", optional = true}

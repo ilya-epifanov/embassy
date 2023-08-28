@@ -17,6 +17,14 @@ pub trait RadioSwitch {
     fn set_rx(&mut self);
 }
 
+pub struct NoRadioSwitch;
+
+impl RadioSwitch for NoRadioSwitch {
+    fn set_tx(&mut self) {}
+
+    fn set_rx(&mut self) {}
+}
+
 /// Semtech Sx127x radio peripheral
 pub struct Sx127xRadio<SPI, CS, RESET, E, I, RFS>
 where
@@ -89,6 +97,40 @@ where
 {
     type PhyError = Sx127xError;
 
+    type SleepFuture<'m>
+    where
+        SPI: 'm,
+        CS: 'm,
+        RESET: 'm,
+        E: 'm,
+        I: 'm,
+        RFS: 'm,
+    = impl Future<Output = Result<(), Self::PhyError>> + 'm;
+
+    fn sleep<'m>(&'m mut self) -> Self::SleepFuture<'m> {
+        async move {
+            self.radio.set_mode(RadioMode::Sleep).await?;
+            Ok(())
+        }
+    }
+
+    type WakeUpFuture<'m>
+    where
+        SPI: 'm,
+        CS: 'm,
+        RESET: 'm,
+        E: 'm,
+        I: 'm,
+        RFS: 'm,
+    = impl Future<Output = Result<(), Self::PhyError>> + 'm;
+
+    fn wake_up<'m>(&'m mut self) -> Self::WakeUpFuture<'m> {
+        async move {
+            self.radio.reset().await?;
+            Ok(())
+        }
+    }
+
     type TxFuture<'m>
     where
         SPI: 'm,
@@ -104,7 +146,9 @@ where
         async move {
             self.radio.set_mode(RadioMode::Stdby).await.ok().unwrap();
             self.rfs.set_tx();
-            self.radio.set_tx_power(14, 0).await?;
+            self.radio
+                .set_tx_power(config.pw.into(), config.pa_output_pin)
+                .await?;
             self.radio.set_frequency(config.rf.frequency).await?;
             // TODO: Modify radio to support other coding rates
             self.radio.set_coding_rate_4(5).await?;
@@ -120,6 +164,7 @@ where
             self.radio.set_lora_sync_word().await?;
             self.radio.set_invert_iq(false).await?;
             self.radio.set_crc(true).await?;
+            self.radio.set_tcxo(config.external_tcxo).await?;
 
             self.radio.set_dio0_tx_done().await?;
 
@@ -164,7 +209,7 @@ where
 
             self.radio.set_preamble_length(8).await?;
             self.radio.set_lora_sync_word().await?;
-            self.radio.set_invert_iq(true).await?;
+            self.radio.set_invert_iq(false).await?;
             self.radio.set_crc(true).await?;
 
             self.radio.set_dio0_rx_done().await?;

@@ -6,7 +6,9 @@ use core::task::Poll;
 use embassy::interrupt::InterruptExt;
 use embassy::util::Unborrow;
 use embassy_hal_common::unborrow;
+use embassy_traits::spi::{FullDuplex, Read, Spi, Write};
 use futures::future::poll_fn;
+use core::future::Future;
 
 use crate::gpio;
 use crate::gpio::sealed::Pin as _;
@@ -261,6 +263,42 @@ impl<'d, T: Instance> Drop for Spim<'d, T> {
         gpio::deconfigure_pin(r.psel.mosi.read().bits());
 
         trace!("spim drop: done");
+    }
+}
+
+impl<'d, T: Instance> Spi<u8> for Spim<'d, T> {
+    type Error = Error;
+}
+impl<'d, T: Instance> Read<u8> for Spim<'d, T> {
+    type ReadFuture<'a>
+    where
+        Self: 'a,
+    = impl Future<Output = Result<(), Self::Error>> + 'a;
+
+    fn read<'a>(&'a mut self, data: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        self.read(data)
+    }
+}
+
+impl<'d, T: Instance> Write<u8> for Spim<'d, T> {
+    type WriteFuture<'a>
+    where
+        Self: 'a,
+    = impl Future<Output = Result<(), Self::Error>> + 'a;
+
+    fn write<'a>(&'a mut self, data: &'a [u8]) -> Self::WriteFuture<'a> {
+        self.write(data)
+    }
+}
+
+impl<'d, T: Instance> FullDuplex<u8> for Spim<'d, T> {
+    type WriteReadFuture<'a>
+    where
+        Self: 'a,
+    = impl Future<Output = Result<(), Self::Error>> + 'a;
+
+    fn read_write<'a>(&'a mut self, rx: &'a mut [u8], tx: &'a [u8]) -> Self::WriteReadFuture<'a> {
+        self.transfer(rx, tx)
     }
 }
 

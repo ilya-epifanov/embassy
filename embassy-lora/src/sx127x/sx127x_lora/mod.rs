@@ -9,6 +9,7 @@ use bit_field::BitField;
 use embassy::time::{Duration, Timer};
 use embassy::traits::spi::*;
 use embedded_hal::digital::v2::OutputPin;
+use lorawan_device::radio::PaOutputPin;
 
 mod register;
 use self::register::PaConfig;
@@ -80,7 +81,6 @@ where
                 .await?;
             self.write_register(Register::RegModemConfig3.addr(), 0x04)
                 .await?;
-            self.set_tcxo(true).await?;
             self.set_mode(RadioMode::Stdby).await?;
             self.cs.set_high().map_err(CS)?;
             Ok(())
@@ -126,9 +126,12 @@ where
                 .await?;
             self.write_register(Register::RegPayloadLength.addr(), 0)
                 .await?;
-            for byte in buffer.iter() {
-                self.write_register(Register::RegFifo.addr(), *byte).await?;
-            }
+            // for byte in buffer.iter() {
+            //     self.write_register(Register::RegFifo.addr(), *byte).await?;
+            // }
+            self.write_register_buf(Register::RegFifo.addr(), &buffer)
+                .await?;
+
             self.write_register(Register::RegPayloadLength.addr(), buffer.len() as u8)
                 .await?;
             self.set_mode(RadioMode::Tx).await?;
@@ -210,43 +213,44 @@ where
     pub async fn set_tx_power(
         &mut self,
         mut level: i32,
-        output_pin: u8,
+        output_pin: PaOutputPin,
     ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
-        if PaConfig::PaOutputRfoPin.addr() == output_pin {
-            // RFO
-            if level < 0 {
-                level = 0;
-            } else if level > 14 {
-                level = 14;
-            }
-            self.write_register(Register::RegPaConfig.addr(), (0x70 | level) as u8)
-                .await
-        } else {
-            // PA BOOST
-            if level > 17 {
-                if level > 20 {
-                    level = 20;
+        match output_pin {
+            PaOutputPin::Rfo => {
+                if level < 0 {
+                    level = 0;
+                } else if level > 14 {
+                    level = 14;
                 }
-                // subtract 3 from level, so 18 - 20 maps to 15 - 17
-                level -= 3;
+                self.write_register(Register::RegPaConfig.addr(), (0x70 | level) as u8)
+                    .await
+            }
+            PaOutputPin::PaBoost => {
+                if level > 17 {
+                    if level > 20 {
+                        level = 20;
+                    }
+                    // subtract 3 from level, so 18 - 20 maps to 15 - 17
+                    level -= 3;
 
-                // High Power +20 dBm Operation (Semtech SX1276/77/78/79 5.4.3.)
-                self.write_register(Register::RegPaDac.addr(), 0x87).await?;
-                self.set_ocp(140).await?;
-            } else {
-                if level < 2 {
-                    level = 2;
+                    // High Power +20 dBm Operation (Semtech SX1276/77/78/79 5.4.3.)
+                    self.write_register(Register::RegPaDac.addr(), 0x87).await?;
+                    self.set_ocp(140).await?;
+                } else {
+                    if level < 2 {
+                        level = 2;
+                    }
+                    //Default value PA_HF/LF or +17dBm
+                    self.write_register(Register::RegPaDac.addr(), 0x84).await?;
+                    self.set_ocp(100).await?;
                 }
-                //Default value PA_HF/LF or +17dBm
-                self.write_register(Register::RegPaDac.addr(), 0x84).await?;
-                self.set_ocp(100).await?;
+                level -= 2;
+                self.write_register(
+                    Register::RegPaConfig.addr(),
+                    PaConfig::PaBoost.addr() | level as u8,
+                )
+                .await
             }
-            level -= 2;
-            self.write_register(
-                Register::RegPaConfig.addr(),
-                PaConfig::PaBoost.addr() | level as u8,
-            )
-            .await
         }
     }
 
@@ -344,13 +348,17 @@ where
             sf = 12;
         }
 
+        let detection_opt = self
+            .read_register(Register::RegDetectionOptimize.addr())
+            .await?
+            & 0b01111000;
         if sf == 6 {
-            self.write_register(Register::RegDetectionOptimize.addr(), 0xc5)
+            self.write_register(Register::RegDetectionOptimize.addr(), detection_opt | 0x05)
                 .await?;
             self.write_register(Register::RegDetectionThreshold.addr(), 0x0c)
                 .await?;
         } else {
-            self.write_register(Register::RegDetectionOptimize.addr(), 0xc3)
+            self.write_register(Register::RegDetectionOptimize.addr(), detection_opt | 0x03)
                 .await?;
             self.write_register(Register::RegDetectionThreshold.addr(), 0x0a)
                 .await?;
@@ -374,9 +382,9 @@ where
         external: bool,
     ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
         if external {
-            self.write_register(Register::RegTcxo.addr(), 0x10).await
+            self.write_register(Register::RegTcxo.addr(), 0x19).await
         } else {
-            self.write_register(Register::RegTcxo.addr(), 0x00).await
+            self.write_register(Register::RegTcxo.addr(), 0x09).await
         }
     }
 
@@ -561,6 +569,18 @@ where
     ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
         self.cs.set_low().map_err(CS)?;
         let buffer = [reg | 0x80, byte];
+        self.spi.write(&buffer).await.map_err(SPI)?;
+        self.cs.set_high().map_err(CS)?;
+        Ok(())
+    }
+
+    pub async fn write_register_buf(
+        &mut self,
+        reg: u8,
+        buffer: &[u8],
+    ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
+        self.cs.set_low().map_err(CS)?;
+        self.spi.write(&[reg | 0x80]).await.map_err(SPI)?;
         self.spi.write(&buffer).await.map_err(SPI)?;
         self.cs.set_high().map_err(CS)?;
         Ok(())
